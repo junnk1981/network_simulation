@@ -65,15 +65,15 @@ class L2Network:
 
         for link in LINK:
             nodes = self._link_to_node(link)
-            Band1mTCLink(nodes[0], nodes[1])
+            Band1mTCLink(nodes[0][0], nodes[1][0], port1=int(nodes[0][1]), port2=int(nodes[1][1]))
 
     def _link_to_node(self, link):
         nodes = []
-        for node in link:
-            if node.startswith("s"):
-                nodes.append(self.list_switch[int(node[1:]) - 1])
-            elif node.startswith("h"):
-                nodes.append(self.list_host[int(node[1:]) - 1])
+        for node in [[link[0], link[1]], [link[2], link[3]]]:
+            if node[0].startswith("s"):
+                nodes.append([self.list_switch[int(node[0][1:]) - 1], node[1]])
+            elif node[0].startswith("h"):
+                nodes.append([self.list_host[int(node[0][1:]) - 1], node[1]])
             else:
                 raise Exception
         return nodes

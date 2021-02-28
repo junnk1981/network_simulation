@@ -20,6 +20,7 @@ class ExampleSwitch13(app_manager.RyuApp):
         datapath = ev.msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
+        print("##### datapath: "str(datapath))
 
         # install the table-miss flow entry.
         match = parser.OFPMatch()
