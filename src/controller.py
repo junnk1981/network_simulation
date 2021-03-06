@@ -1,14 +1,18 @@
+import json
 import os
 import re
+from decimal import Decimal
 from ryu.base import app_manager
 from ryu.controller import ofp_event
 from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER, DEAD_DISPATCHER
 from ryu.controller.handler import set_ev_cls
+from ryu.app.wsgi import ControllerBase, WSGIApplication, route
 from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib import hub
 from ryu.controller import dpset
+from webob import Response
 
 from operator import attrgetter
 
@@ -19,15 +23,20 @@ from definitions.network import LINK
 
 DB_PASS = os.getenv("DB_PASS", "password")
 
+controller_instance_name = 'controller_api_app'
+url = '/controller/flowtable'
 
-class ExampleSwitch13(app_manager.RyuApp):
+LIMIT_BANDWIDTH = 20
+
+class OpenflowController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
     _CONTEXTS = {
         'dpset': dpset.DPSet,
+        'wsgi': WSGIApplication
     }
 
     def __init__(self, *args, **kwargs):
-        super(ExampleSwitch13, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         # initialize mac address table.
         self.mac_to_port = {}
         self.datapaths = {}
@@ -35,6 +44,9 @@ class ExampleSwitch13(app_manager.RyuApp):
         self.dpset = kwargs['dpset']
         self.graph = Graph(password=DB_PASS)
         self.monitor_thread = hub.spawn(self._monitor)
+        wsgi = kwargs['wsgi']
+        wsgi.register(RestController,
+                      {controller_instance_name: self})
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -47,7 +59,9 @@ class ExampleSwitch13(app_manager.RyuApp):
 
     def __get_shortest_path(self, src_type, src_node_name, dst_type, dst_node_name):
         string = f'MATCH p = shortestPath((s:{src_type} {{name:"{src_node_name}"}})-[:connect*0..]-(d:{dst_type} {{name:"{dst_node_name}"}})) RETURN p'
-        return self.graph.run(string)
+        res = self.graph.run(string)
+        lines = str(res).split("\n")
+        return lines[2]
 
     def __get_connected_host(self, datapath_id):
         string = f'MATCH (s:switch {{name:"s{datapath_id}"}})-[:connect]->(d:host) RETURN d'
@@ -64,14 +78,12 @@ class ExampleSwitch13(app_manager.RyuApp):
         
         return hosts
 
-
     def __initial_setup_flow_table(self, datapath):
         switch_name = f"s{datapath.id}"
         parser = datapath.ofproto_parser
         for host in HOST_LIST:
-            res = self.__get_shortest_path("switch", switch_name, "host", host["name"])
-            lines = str(res).split("\n")
-            m = re.search(r'^ \((s[\w]*)\)[^(]*\(([sh][\w]*)\).*', lines[2])
+            shortest_path = self.__get_shortest_path("switch", switch_name, "host", host["name"])
+            m = re.search(r'^ \((s[\w]*)\)[^(]*\(([sh][\w]*)\).*', shortest_path)
             next_node_name = m.group(2)
             out_port = self.__get_ports(next_node_name, switch_name)
             actions = [parser.OFPActionOutput(int(out_port))]
@@ -88,9 +100,6 @@ class ExampleSwitch13(app_manager.RyuApp):
             elif li[2] == dst_node and li[0] == switch:
                 out_port = li[1]
         return out_port
-
-
-
 
     def add_flow(self, datapath, priority, match, actions):
         ofproto = datapath.ofproto
@@ -189,5 +198,87 @@ class ExampleSwitch13(app_manager.RyuApp):
         else:
             raise Exception('Internal Error')
         self.graph.run(string)
-        
 
+    def update_flow_table(self, src_host, dst_host):
+
+        print("updating flow table")
+        path_list = self.__get_path_list("host", src_host, "host", dst_host)
+        path_info_list = self.__parse_path_list(path_list)
+        self.__update_flow_table(path_info_list)
+        
+    def __get_path_list(self, src_type, src_node_name, dst_type, dst_node_name):
+        total_paths = []
+        for i in range(20):
+            string = f'MATCH p = (h:{src_type} {{name:"{src_node_name}"}})-[:connect*{i}..{i}]-(d:{dst_type} {{name:"{dst_node_name}"}}) RETURN p'
+            res = self.graph.run(string)
+            paths = str(res).split("\n")
+            if len(paths) > 3:
+                paths = paths[2:-1]
+                total_paths += paths
+        return total_paths
+
+    def __parse_path_list(self, path_list):
+        path_info_list = []
+        for path in path_list:
+            nodes = re.findall(r'\(([^)]*)\)', path)
+            relations = re.findall(r'\[([^]]*)\]', path)
+            hop_count, min_bandwidth = self.__create_summary_info(nodes, relations)
+            path_info_list.append({
+                "nodes": nodes,
+                "relations": relations,
+                "hop_count": hop_count,
+                "min_bandwidth": min_bandwidth
+            })
+        return path_info_list
+
+    def __create_summary_info(self, nodes, relations):
+        hop_count = len(nodes) - 1
+        max_rate = 0
+        for i, relation in enumerate(relations):
+            m = re.search(r'{(.*)}', relation)
+            raw_props = m.group(1)
+            prop_list = raw_props.split(",")
+            for prop in prop_list:
+                _key, _val = prop.split(":")
+                if _key == f"{nodes[i]}{nodes[i + 1]}":
+                    if max_rate < Decimal(_val):
+                        max_rate = Decimal(_val)
+        min_bandwidth = 100 - Decimal(_val)
+        return hop_count, min_bandwidth
+
+    def __update_flow_table(self, path_info_list):
+        sorted_path_info_list = sorted(path_info_list, key=lambda x: x['hop_count'])
+        for info in sorted_path_info_list:
+            if info["min_bandwidth"] >= LIMIT_BANDWIDTH:
+                self.__update(info["nodes"])
+                break
+
+    def __update(self, nodes):
+        pass
+
+
+class RestController(ControllerBase):
+
+    def __init__(self, req, link, data, **config):
+        super().__init__(req, link, data, **config)
+        self.controller_app = data[controller_instance_name]
+
+    @route('controller', url, methods=['POST'], requirements={})
+    def update_flow_table(self, req, **kwargs):
+
+        controller_app = self.controller_app
+
+        print(req)
+        print(kwargs)
+
+        try:
+            body = req.json if req.body else {}
+            src_host = body["src_host"]
+            dst_host = body["dst_host"]
+        except ValueError:
+            raise Response(status=400)
+
+        controller_app.update_flow_table(src_host, dst_host)
+        res = {"result": "success"}
+        body = json.dumps(res)
+        return Response(content_type='application/json', json_body=res)
