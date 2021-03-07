@@ -223,12 +223,13 @@ class OpenflowController(app_manager.RyuApp):
             nodes = re.findall(r'\(([^)]*)\)', path)
             relations = re.findall(r'\[([^]]*)\]', path)
             hop_count, min_bandwidth = self.__create_summary_info(nodes, relations)
-            path_info_list.append({
-                "nodes": nodes,
-                "relations": relations,
-                "hop_count": hop_count,
-                "min_bandwidth": min_bandwidth
-            })
+            if len(nodes) == len(set(nodes)):
+                path_info_list.append({
+                    "nodes": nodes,
+                    "relations": relations,
+                    "hop_count": hop_count,
+                    "min_bandwidth": min_bandwidth
+                })
         return path_info_list
 
     def __create_summary_info(self, nodes, relations):
