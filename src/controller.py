@@ -26,7 +26,7 @@ DB_PASS = os.getenv("DB_PASS", "password")
 controller_instance_name = 'controller_api_app'
 url = '/controller/flowtable'
 
-LIMIT_BANDWIDTH = 20
+LIMIT_BANDWIDTH = 70
 
 class OpenflowController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -240,21 +240,66 @@ class OpenflowController(app_manager.RyuApp):
             prop_list = raw_props.split(",")
             for prop in prop_list:
                 _key, _val = prop.split(":")
+                _key, _val = _key.strip(), _val.strip()
                 if _key == f"{nodes[i]}{nodes[i + 1]}":
                     if max_rate < Decimal(_val):
                         max_rate = Decimal(_val)
-        min_bandwidth = 100 - Decimal(_val)
+        min_bandwidth = 100 - max_rate
         return hop_count, min_bandwidth
 
     def __update_flow_table(self, path_info_list):
         sorted_path_info_list = sorted(path_info_list, key=lambda x: x['hop_count'])
         for info in sorted_path_info_list:
+            print(info["nodes"])
+            print(info["min_bandwidth"])
             if info["min_bandwidth"] >= LIMIT_BANDWIDTH:
                 self.__update(info["nodes"])
                 break
 
     def __update(self, nodes):
-        pass
+        src_node_mac = HOST_LIST[int(nodes[0][1:]) - 1]["mac"]
+        dst_node_mac = HOST_LIST[int(nodes[-1][1:]) - 1]["mac"]
+        for i in range(len(nodes) - 1):
+            port1, port2 = self.__get_port(nodes[i], nodes[i + 1])
+            if nodes[i].startswith("s"):
+                datapath = self.__get_datapath(nodes[i])
+                ofproto = datapath.ofproto
+                parser = datapath.ofproto_parser
+                actions = [parser.OFPActionOutput(int(port1))]
+                match = parser.OFPMatch(eth_src=src_node_mac, eth_dst=dst_node_mac)
+                print(f"switch: {nodes[i]}, dpid: {datapath.id}, src: {src_node_mac}, dst: {dst_node_mac}, port: {port1}")
+                self.add_flow(datapath, 1, match, actions)
+
+            if nodes[i + 1].startswith("s"):
+                datapath = self.__get_datapath(nodes[i + 1])
+                ofproto = datapath.ofproto
+                parser = datapath.ofproto_parser
+                actions = [parser.OFPActionOutput(int(port2))]
+                match = parser.OFPMatch(eth_src=dst_node_mac, eth_dst=src_node_mac)
+                print(f"switch: {nodes[i + 1]}, dpid: {datapath.id}, src: {dst_node_mac}, dst: {src_node_mac}, port: {port2}")
+                self.add_flow(datapath, 1, match, actions)
+
+    def __get_port(self, node1, node2):
+        for li in LINK:
+            if li[0] == node1 and li[2] == node2:
+                port1 = li[1]
+                port2 = li[3]
+                break
+            elif li[2] == node1 and li[0] == node2:
+                connected_node = li[0]
+                port1 = li[3]
+                port2 = li[1]
+                break
+        return port1, port2
+
+    def __get_datapath(self, switch_name):
+        switch_id = int(switch_name[1:])
+        dp_all = self.dpset.get_all()
+        for dp in dp_all:
+            if switch_id == dp[1].id:
+                return dp[1]
+
+
 
 
 class RestController(ControllerBase):
