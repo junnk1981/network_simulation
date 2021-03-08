@@ -24,9 +24,12 @@ from definitions.network import LINK
 DB_PASS = os.getenv("DB_PASS", "password")
 
 controller_instance_name = 'controller_api_app'
-url = '/controller/flowtable'
+video_url = '/controller/video/flowtable'
+other_traffic_url = '/controller/other/flowtable'
+other_traffic_complete_url = '/controller/other/complete'
 
-LIMIT_BANDWIDTH = 70
+LIMIT_VIDEO_BANDWIDTH = 70
+LIMIT_OTHER_BANDWIDTH = 70
 
 class OpenflowController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -44,6 +47,7 @@ class OpenflowController(app_manager.RyuApp):
         self.dpset = kwargs['dpset']
         self.graph = Graph(password=DB_PASS)
         self.monitor_thread = hub.spawn(self._monitor)
+        self.other_traffic = {}
         wsgi = kwargs['wsgi']
         wsgi.register(RestController,
                       {controller_instance_name: self})
@@ -199,17 +203,29 @@ class OpenflowController(app_manager.RyuApp):
             raise Exception('Internal Error')
         self.graph.run(string)
 
-    def update_flow_table(self, src_host, dst_host):
+    def update_flow_table(self, src_host, dst_host, traffic_type):
 
         print("updating flow table")
-        path_list = self.__get_path_list("host", src_host, "host", dst_host)
-        path_info_list = self.__parse_path_list(path_list)
-        self.__update_flow_table(path_info_list)
+        if traffic_type == "video":
+            path_list = [self.__get_shortest_path("host", src_host, "host", dst_host)]
+            path_info_list = self.__parse_path_list(path_list)
+            self.__update_video_flow_table(path_info_list)
+        else:
+            path_list = self.__get_path_list("host", src_host, "host", dst_host)
+            path_info_list = self.__parse_path_list(path_list)
+            self.__update_other_flow_table(path_info_list)
         
-    def __get_path_list(self, src_type, src_node_name, dst_type, dst_node_name):
+    def __get_path_list(self, src_type, src_node_name, dst_type, dst_node_name, filter_path = None):
         total_paths = []
+        where_string = ""
+        if filter_path:
+            where_string = "WHERE ALL(n IN RELATIONSHIPS(p) WHERE not "
+            for i in range(len(filter_path) - 1):
+                where_string += f'(startNode(n).name = "{filter_path[i]}" and endNode(n).name = "{filter_path[i + 1]}") and not '
+                where_string += f'(startNode(n).name = "{filter_path[i + 1]}" and endNode(n).name = "{filter_path[i]}") and not '
+            where_string = where_string[:-9] + ") "
         for i in range(20):
-            string = f'MATCH p = (h:{src_type} {{name:"{src_node_name}"}})-[:connect*{i}..{i}]-(d:{dst_type} {{name:"{dst_node_name}"}}) RETURN p'
+            string = f'MATCH p = (h:{src_type} {{name:"{src_node_name}"}})-[:connect*{i}..{i}]-(d:{dst_type} {{name:"{dst_node_name}"}}) {where_string}RETURN p'
             res = self.graph.run(string)
             paths = str(res).split("\n")
             if len(paths) > 3:
@@ -222,19 +238,21 @@ class OpenflowController(app_manager.RyuApp):
         for path in path_list:
             nodes = re.findall(r'\(([^)]*)\)', path)
             relations = re.findall(r'\[([^]]*)\]', path)
-            hop_count, min_bandwidth = self.__create_summary_info(nodes, relations)
+            hop_count, min_bandwidth, exceeded_video_limitation_relations = self.__create_summary_info(nodes, relations)
             if len(nodes) == len(set(nodes)):
                 path_info_list.append({
                     "nodes": nodes,
                     "relations": relations,
                     "hop_count": hop_count,
-                    "min_bandwidth": min_bandwidth
+                    "min_bandwidth": min_bandwidth,
+                    "exceeded_video_limitation_relations": exceeded_video_limitation_relations
                 })
         return path_info_list
 
     def __create_summary_info(self, nodes, relations):
         hop_count = len(nodes) - 1
         max_rate = 0
+        exceeded_video_limitation_relations = []
         for i, relation in enumerate(relations):
             m = re.search(r'{(.*)}', relation)
             raw_props = m.group(1)
@@ -243,19 +261,39 @@ class OpenflowController(app_manager.RyuApp):
                 _key, _val = prop.split(":")
                 _key, _val = _key.strip(), _val.strip()
                 if _key == f"{nodes[i]}{nodes[i + 1]}":
+                    if 100 - Decimal(_val) < LIMIT_VIDEO_BANDWIDTH:
+                        exceeded_video_limitation_relations.append(i)
                     if max_rate < Decimal(_val):
                         max_rate = Decimal(_val)
         min_bandwidth = 100 - max_rate
-        return hop_count, min_bandwidth
+        return hop_count, min_bandwidth, exceeded_video_limitation_relations
 
-    def __update_flow_table(self, path_info_list):
+    def __update_video_flow_table(self, path_info_list):
         sorted_path_info_list = sorted(path_info_list, key=lambda x: x['hop_count'])
         for info in sorted_path_info_list:
             print(info["nodes"])
             print(info["min_bandwidth"])
-            if info["min_bandwidth"] >= LIMIT_BANDWIDTH:
+            if info["min_bandwidth"] >= LIMIT_VIDEO_BANDWIDTH:
                 self.__update(info["nodes"])
                 break
+            else:
+                self.__modify_other_flow_table(info)
+                self.__update(info["nodes"])
+                break
+        raise Exception
+
+    def __update_other_flow_table(self, path_info_list):
+        sorted_path_info_list = sorted(path_info_list, key=lambda x: x['hop_count'])
+        for info in sorted_path_info_list:
+            print(info["nodes"])
+            print(info["min_bandwidth"])
+            if info["min_bandwidth"] >= LIMIT_OTHER_BANDWIDTH:
+                self.__update(info["nodes"])
+                start_node = nodes[0]
+                end_node = nodes[-1]
+                self.other_traffic[f"{start_node}{end_node}"] = nodes
+                break
+        raise Exception
 
     def __update(self, nodes):
         src_node_mac = HOST_LIST[int(nodes[0][1:]) - 1]["mac"]
@@ -300,7 +338,33 @@ class OpenflowController(app_manager.RyuApp):
             if switch_id == dp[1].id:
                 return dp[1]
 
+    def __modify_other_flow_table(self, info):
+        change_traffic_keys = set()
+        for i in info["exceeded_video_limitation_relations"]:
+            flg_find = 0
+            node1 = info["nodes"][i]
+            node2 = info["nodes"][i + 1]
+            for key, other_traffic_nodes in self.other_traffic.items():
+                for j in range(len(other_traffic_nodes) - 1):
+                    if other_traffic_nodes[j] == node1 and other_traffic_nodes[j + 1] == node2:
+                        change_traffic_keys.append(key)
+                        flg_find = 1
+                        break
+                if flg_find == 1:
+                    break
+        for key in change_traffic_keys:
+            m = re.search(r'(h[0-9]*)(h[0-9]*)', key)
+            src_node_name = m.group(1)
+            dst_node_name = m.group(2)
+            path_list = self.__get_path_list("host", src_node_name, "host", dst_node_name, self.other_traffic[key])
+            path_info_list = self.__parse_path_list(path_list)
+            self.__update_other_flow_table(path_info_list)
+            
 
+
+
+    def complete_other_traffic(self, src_host, dst_host):
+        del self.other_traffic[f"{src_host}{dst_host}"]
 
 
 class RestController(ControllerBase):
@@ -309,8 +373,8 @@ class RestController(ControllerBase):
         super().__init__(req, link, data, **config)
         self.controller_app = data[controller_instance_name]
 
-    @route('controller', url, methods=['POST'], requirements={})
-    def update_flow_table(self, req, **kwargs):
+    @route('controller', other_traffic_url, methods=['POST'], requirements={})
+    def update_other_traffic_flow_table(self, req, **kwargs):
 
         controller_app = self.controller_app
 
@@ -324,7 +388,32 @@ class RestController(ControllerBase):
         except ValueError:
             raise Response(status=400)
 
-        controller_app.update_flow_table(src_host, dst_host)
-        res = {"result": "success"}
+        try:
+            controller_app.update_flow_table(src_host, dst_host, "other")
+            res = {"result": "success"}
+        except Exception as e:
+            print(e)
+            res = {"result": "fail"}
+        body = json.dumps(res)
+        return Response(content_type='application/json', json_body=res)
+
+    @route('controller', other_traffic_complete_url, methods=['POST'], requirements={})
+    def complete_other_traffic(self, req, **kwargs):
+
+        controller_app = self.controller_app
+
+        try:
+            body = req.json if req.body else {}
+            src_host = body["src_host"]
+            dst_host = body["dst_host"]
+        except ValueError:
+            raise Response(status=400)
+
+        try:
+            controller_app.complete_other_traffic(src_host, dst_host)
+            res = {"result": "success"}
+        except Exception as e:
+            print(e)
+            res = {"result": "fail"}
         body = json.dumps(res)
         return Response(content_type='application/json', json_body=res)
