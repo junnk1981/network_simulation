@@ -21,15 +21,25 @@ from py2neo import Graph, Node, Relationship
 from definitions.host import HOST_LIST
 from definitions.network import LINK
 
+from enum import Enum
+
 DB_PASS = os.getenv("DB_PASS", "password")
 
 controller_instance_name = 'controller_api_app'
 video_url = '/controller/video/flowtable'
 other_traffic_url = '/controller/other/flowtable'
+get_other_traffic = '/controller/other/flowtable'
 other_traffic_complete_url = '/controller/other/complete'
 
 LIMIT_VIDEO_BANDWIDTH = 70
 LIMIT_OTHER_BANDWIDTH = 70
+
+class PathSelectAlgorithm(Enum):
+    SHOTEST_PATH: int = 1
+    LONGEST_PATH: int = 2
+    BANDWIDTH: int = 3
+
+PATH_SELECT_ALGORITHM = PathSelectAlgorithm.SHOTEST_PATH
 
 class OpenflowController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -275,24 +285,31 @@ class OpenflowController(app_manager.RyuApp):
             print(info["min_bandwidth"])
             if info["min_bandwidth"] >= LIMIT_VIDEO_BANDWIDTH:
                 self.__update(info["nodes"])
-                break
+                return
             else:
                 self.__modify_other_flow_table(info)
                 self.__update(info["nodes"])
-                break
+                return
+        print("error in __update_video_flow_table")
         raise Exception
 
-    def __update_other_flow_table(self, path_info_list):
+    def __update_other_flow_table(self, path_info_list, modify=False):
+
         sorted_path_info_list = sorted(path_info_list, key=lambda x: x['hop_count'])
         for info in sorted_path_info_list:
+            nodes = info["nodes"]
             print(info["nodes"])
             print(info["min_bandwidth"])
             if info["min_bandwidth"] >= LIMIT_OTHER_BANDWIDTH:
                 self.__update(info["nodes"])
                 start_node = nodes[0]
                 end_node = nodes[-1]
+                if modify and not self.other_traffic[f"{start_node}{end_node}"]:
+                    print("already completed the traffic")
+                    return
                 self.other_traffic[f"{start_node}{end_node}"] = nodes
-                break
+                return
+        print("error found no path with enough bandwidth")
         raise Exception
 
     def __update(self, nodes):
@@ -344,10 +361,19 @@ class OpenflowController(app_manager.RyuApp):
             flg_find = 0
             node1 = info["nodes"][i]
             node2 = info["nodes"][i + 1]
-            for key, other_traffic_nodes in self.other_traffic.items():
+            other_traffic_list = [{"key": k,  "nodes": v, "num_nodes": len(v)} for k, v in  self.other_traffic.items()]
+            if PATH_SELECT_ALGORITHM == PathSelectAlgorithm.SHOTEST_PATH:
+                sorted_other_traffic_list = sorted(other_traffic_list, key=lambda x: x['num_nodes'])
+            elif PATH_SELECT_ALGORITHM == PathSelectAlgorithm.LONGEST_PATH:
+                sorted_other_traffic_list = sorted(other_traffic_list, key=lambda x: x['num_nodes'], reverse=True)
+            elif PATH_SELECT_ALGORITHM == PathSelectAlgorithm.BANDWIDTH:
+                raise Exception("not implemented")
+            for traffic in sorted_other_traffic_list:
+                key = traffic["key"]
+                other_traffic_nodes = traffic["nodes"]
                 for j in range(len(other_traffic_nodes) - 1):
                     if other_traffic_nodes[j] == node1 and other_traffic_nodes[j + 1] == node2:
-                        change_traffic_keys.append(key)
+                        change_traffic_keys.add(key)
                         flg_find = 1
                         break
                 if flg_find == 1:
@@ -356,12 +382,16 @@ class OpenflowController(app_manager.RyuApp):
             m = re.search(r'(h[0-9]*)(h[0-9]*)', key)
             src_node_name = m.group(1)
             dst_node_name = m.group(2)
-            path_list = self.__get_path_list("host", src_node_name, "host", dst_node_name, self.other_traffic[key])
+            print(src_node_name)
+            print(dst_node_name)
+            print(self.other_traffic[key])
+            path_list = self.__get_path_list("host", src_node_name, "host", dst_node_name, info["nodes"])
             path_info_list = self.__parse_path_list(path_list)
-            self.__update_other_flow_table(path_info_list)
+            self.__update_other_flow_table(path_info_list, True)
             
 
-
+    def get_other_traffic(self):
+        return self.other_traffic
 
     def complete_other_traffic(self, src_host, dst_host):
         del self.other_traffic[f"{src_host}{dst_host}"]
@@ -397,6 +427,30 @@ class RestController(ControllerBase):
         body = json.dumps(res)
         return Response(content_type='application/json', json_body=res)
 
+    @route('controller', video_url, methods=['POST'], requirements={})
+    def update_video_traffic_flow_table(self, req, **kwargs):
+
+        controller_app = self.controller_app
+
+        print(req)
+        print(kwargs)
+
+        try:
+            body = req.json if req.body else {}
+            src_host = body["src_host"]
+            dst_host = body["dst_host"]
+        except ValueError:
+            raise Response(status=400)
+
+        try:
+            controller_app.update_flow_table(src_host, dst_host, "video")
+            res = {"result": "success"}
+        except Exception as e:
+            print(e)
+            res = {"result": "fail"}
+        body = json.dumps(res)
+        return Response(content_type='application/json', json_body=res)
+
     @route('controller', other_traffic_complete_url, methods=['POST'], requirements={})
     def complete_other_traffic(self, req, **kwargs):
 
@@ -412,6 +466,19 @@ class RestController(ControllerBase):
         try:
             controller_app.complete_other_traffic(src_host, dst_host)
             res = {"result": "success"}
+        except Exception as e:
+            print(e)
+            res = {"result": "fail"}
+        body = json.dumps(res)
+        return Response(content_type='application/json', json_body=res)
+
+    @route('controller', get_other_traffic, methods=['GET'], requirements={})
+    def get_other_traffic(self, req, **kwargs):
+
+        controller_app = self.controller_app
+
+        try:
+            res = controller_app.get_other_traffic()
         except Exception as e:
             print(e)
             res = {"result": "fail"}

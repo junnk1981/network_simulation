@@ -1,4 +1,11 @@
 import os
+import json
+from concurrent import futures
+import time
+
+import requests
+
+import random
 
 from mininet.cli import CLI
 from mininet.net import Mininet
@@ -15,6 +22,10 @@ from definitions.switch import SWITCH_LIST, NUM_SWITCH
 
 DB_PASS = os.getenv("DB_PASS", "password")
 PORT = 6633
+
+OTHER_TRAFFIC_FLOW_UPDATE = 'http://127.0.0.1:8080/controller/other/flowtable'
+VIDEO_TRAFFIC_FLOW_UPDATE = 'http://127.0.0.1:8080/controller/video/flowtable'
+OTHER_TRAFFIC_FLOW_COMPLETE = 'http://127.0.0.1:8080/controller/other/complete'
 
 class L2Network:
     def __init__(self):
@@ -61,6 +72,7 @@ class L2Network:
                 num=str(i + 1)
             )
             host = self.net.addHost(host_name)
+            host.cmd("iperf -s &")
             self.list_host.append(host)
             tx.create(Node("host", name=host_name))
         tx.commit()
@@ -127,16 +139,64 @@ class L2Network:
 
         self.net.startTerms()
 
-        cli = CLI(self.net)
+        self.c0.cmd("ryu-manager controller.py &")
+
+        # cli = CLI(self.net)
 
     def stop_network(self):
         self.net.stop()
+
+    def exec_simulation(self):
+        other_count = 0
+        other_fail_count = 0
+        video_count = 0
+        video_fail_count = 0
+        future_list = []
+        with futures.ThreadPoolExecutor(max_workers=4) as executor:
+            # while True:
+            for i in range(4):
+                _type = "other"
+                start_node = random.randrange(NUM_HOST)
+                end_node = random.randrange(NUM_HOST)
+                if start_node == end_node:
+                    continue
+                if random.randrange(2) == 0:
+                    _type = "video"
+
+                if _type == "other":
+                    future = executor.submit(self.__other_traffic, start_node=start_node, end_node=end_node)
+                    future_list.append(future)
+                else:
+                    future = executor.submit(self.__video_traffic)
+                _ = futures.as_completed(fs=future_list)
+
+
+
+    def __video_traffic(self):
+        print("start video")
+
+    def __other_traffic(self, start_node, end_node):
+        print("start other")
+        # other_count += 1
+        payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
+        res = requests.post(OTHER_TRAFFIC_FLOW_UPDATE, data=json.dumps(payload))
+        if res.json()["result"] == "fail":
+            print("fail")
+            other_fail_count += 1
+            return
+        data_size = random.randrange(10, 90)
+        self.list_host[start_node].cmd(f"iperf -c 10.0.0.{end_node + 1} -n {data_size}M >> result-h{start_node + 1}-h{end_node + 1}.txt")
+        res = requests.post(OTHER_TRAFFIC_FLOW_COMPLETE, data=json.dumps(payload))
+        print("end")
+
 
 if '__main__' == __name__:
 
     l2net = L2Network()
     l2net.create_network()
     l2net.start_network()
+    time.sleep(10)
+    l2net.exec_simulation()
     l2net.stop_network()
 
 
