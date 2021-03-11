@@ -2,6 +2,7 @@ import os
 import json
 from concurrent import futures
 import time
+from datetime import datetime
 
 import requests
 
@@ -26,6 +27,10 @@ PORT = 6633
 OTHER_TRAFFIC_FLOW_UPDATE = 'http://127.0.0.1:8080/controller/other/flowtable'
 VIDEO_TRAFFIC_FLOW_UPDATE = 'http://127.0.0.1:8080/controller/video/flowtable'
 OTHER_TRAFFIC_FLOW_COMPLETE = 'http://127.0.0.1:8080/controller/other/complete'
+
+LOG_DIR = datetime.now().strftime("%m%d%H%M%S")
+os.mkdir(LOG_DIR)
+
 
 class L2Network:
     def __init__(self):
@@ -73,6 +78,7 @@ class L2Network:
             )
             host = self.net.addHost(host_name)
             host.cmd("iperf -s &")
+            host.cmd("iperf -s -u&")
             self.list_host.append(host)
             tx.create(Node("host", name=host_name))
         tx.commit()
@@ -97,7 +103,7 @@ class L2Network:
                 mac = list(filter(lambda x:x["name"] == nodes[1][0].name, HOST_LIST))[0]["mac"]
                 li.intf2.setMAC(mac)
 
-            relation = dict(band_usage=100, rate=0)
+            relation = dict(bandwidth=100)
             node1to2 = Relationship(node1, "connect", node2, **relation)
             # node2to1 = Relationship(node2, "connect", node1, **relation)
             tx.create(node1to2)
@@ -139,7 +145,7 @@ class L2Network:
 
         self.net.startTerms()
 
-        self.c0.cmd("ryu-manager controller.py &")
+        # self.c0.cmd("ryu-manager controller.py &")
 
         # cli = CLI(self.net)
 
@@ -147,14 +153,12 @@ class L2Network:
         self.net.stop()
 
     def exec_simulation(self):
-        other_count = 0
-        other_fail_count = 0
-        video_count = 0
-        video_fail_count = 0
+        count = 0
         future_list = []
-        with futures.ThreadPoolExecutor(max_workers=4) as executor:
-            # while True:
-            for i in range(4):
+        with futures.ThreadPoolExecutor(max_workers=100) as executor:
+            while count < 100:
+            # for i in range(4):
+                count += 1
                 _type = "other"
                 start_node = random.randrange(NUM_HOST)
                 end_node = random.randrange(NUM_HOST)
@@ -167,13 +171,26 @@ class L2Network:
                     future = executor.submit(self.__other_traffic, start_node=start_node, end_node=end_node)
                     future_list.append(future)
                 else:
-                    future = executor.submit(self.__video_traffic)
-                _ = futures.as_completed(fs=future_list)
+                    future = executor.submit(self.__video_traffic, start_node=start_node, end_node=end_node)
+                    future_list.append(future)
+                
+                time.sleep(5)
+            _ = futures.as_completed(fs=future_list)
 
 
 
-    def __video_traffic(self):
+    def __video_traffic(self, start_node, end_node):
         print("start video")
+        payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
+        res = requests.post(VIDEO_TRAFFIC_FLOW_UPDATE, data=json.dumps(payload))
+        if res.json()["result"] == "fail":
+            self.list_host[start_node].cmd(f"echo failed video stream >> {LOG_DIR}/result-video-h{start_node + 1}-h{end_node + 1}.txt")
+            return
+        stream_rate = random.randrange(10, 30)
+        stream_period = random.randrange(10, 30)
+        self.list_host[start_node].cmd(f"iperf -c 10.0.0.{end_node + 1} -u -b {stream_rate}M -t {stream_period}")
+        self.list_host[start_node].cmd(f"echo success video stream >> {LOG_DIR}/result-video-h{start_node + 1}-h{end_node + 1}.txt")
+        print("end video")
 
     def __other_traffic(self, start_node, end_node):
         print("start other")
@@ -181,13 +198,12 @@ class L2Network:
         payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
         res = requests.post(OTHER_TRAFFIC_FLOW_UPDATE, data=json.dumps(payload))
         if res.json()["result"] == "fail":
-            print("fail")
-            other_fail_count += 1
+            self.list_host[start_node].cmd(f"echo failed other stream >> {LOG_DIR}/result-other-h{start_node + 1}-h{end_node + 1}.txt")
             return
-        data_size = random.randrange(10, 90)
-        self.list_host[start_node].cmd(f"iperf -c 10.0.0.{end_node + 1} -n {data_size}M >> result-h{start_node + 1}-h{end_node + 1}.txt")
+        data_size = random.randrange(100, 900)
+        self.list_host[start_node].cmd(f"iperf -c 10.0.0.{end_node + 1} -n {data_size}M | grep sec >> {LOG_DIR}/result-other-h{start_node + 1}-h{end_node + 1}.txt")
         res = requests.post(OTHER_TRAFFIC_FLOW_COMPLETE, data=json.dumps(payload))
-        print("end")
+        print("end other")
 
 
 if '__main__' == __name__:
@@ -195,7 +211,7 @@ if '__main__' == __name__:
     l2net = L2Network()
     l2net.create_network()
     l2net.start_network()
-    time.sleep(10)
+    input()
     l2net.exec_simulation()
     l2net.stop_network()
 

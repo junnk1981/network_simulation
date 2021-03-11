@@ -31,15 +31,16 @@ other_traffic_url = '/controller/other/flowtable'
 get_other_traffic = '/controller/other/flowtable'
 other_traffic_complete_url = '/controller/other/complete'
 
-LIMIT_VIDEO_BANDWIDTH = 70
-LIMIT_OTHER_BANDWIDTH = 70
+LIMIT_VIDEO_BANDWIDTH = 20
+LIMIT_OTHER_BANDWIDTH = 20
 
 class PathSelectAlgorithm(Enum):
-    SHOTEST_PATH: int = 1
+    NO_CHANGE: int = 0
+    SHORTEST_PATH: int = 1
     LONGEST_PATH: int = 2
     BANDWIDTH: int = 3
 
-PATH_SELECT_ALGORITHM = PathSelectAlgorithm.SHOTEST_PATH
+PATH_SELECT_ALGORITHM = PathSelectAlgorithm.LONGEST_PATH
 
 class OpenflowController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -362,12 +363,14 @@ class OpenflowController(app_manager.RyuApp):
             node1 = info["nodes"][i]
             node2 = info["nodes"][i + 1]
             other_traffic_list = [{"key": k,  "nodes": v, "num_nodes": len(v)} for k, v in  self.other_traffic.items()]
-            if PATH_SELECT_ALGORITHM == PathSelectAlgorithm.SHOTEST_PATH:
+            if PATH_SELECT_ALGORITHM == PathSelectAlgorithm.SHORTEST_PATH:
                 sorted_other_traffic_list = sorted(other_traffic_list, key=lambda x: x['num_nodes'])
             elif PATH_SELECT_ALGORITHM == PathSelectAlgorithm.LONGEST_PATH:
                 sorted_other_traffic_list = sorted(other_traffic_list, key=lambda x: x['num_nodes'], reverse=True)
             elif PATH_SELECT_ALGORITHM == PathSelectAlgorithm.BANDWIDTH:
                 raise Exception("not implemented")
+            elif PATH_SELECT_ALGORITHM == PathSelectAlgorithm.NO_CHANGE:
+                raise Exception("not enough bandwidth")
             for traffic in sorted_other_traffic_list:
                 key = traffic["key"]
                 other_traffic_nodes = traffic["nodes"]
