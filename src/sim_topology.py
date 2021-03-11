@@ -28,8 +28,8 @@ OTHER_TRAFFIC_FLOW_UPDATE = 'http://127.0.0.1:8080/controller/other/flowtable'
 VIDEO_TRAFFIC_FLOW_UPDATE = 'http://127.0.0.1:8080/controller/video/flowtable'
 OTHER_TRAFFIC_FLOW_COMPLETE = 'http://127.0.0.1:8080/controller/other/complete'
 
-LOG_DIR = datetime.now().strftime("%m%d%H%M%S")
-os.mkdir(LOG_DIR)
+LOG_DIR = "results/" + datetime.now().strftime("%m%d%H%M%S")
+os.makedirs(LOG_DIR)
 
 
 class L2Network:

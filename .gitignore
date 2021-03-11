@@ -130,3 +130,4 @@ dmypy.json
 .vagrant
 .vscode
 OLD
+src/results
