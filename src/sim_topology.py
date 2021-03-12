@@ -3,6 +3,7 @@ import json
 from concurrent import futures
 import time
 from datetime import datetime
+import copy
 
 import requests
 
@@ -156,25 +157,34 @@ class L2Network:
         count = 0
         future_list = []
         with futures.ThreadPoolExecutor(max_workers=100) as executor:
+            video_server = ["h1", "h11"]
+            client = ["h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10", "h12", "h13", "h14", "h15", "h16", "h17", "h18", "h19"]
             while count < 100:
             # for i in range(4):
                 count += 1
-                _type = "other"
-                start_node = random.randrange(NUM_HOST)
-                end_node = random.randrange(NUM_HOST)
-                if start_node == end_node:
-                    continue
+                # _type = "other"
+                # start_node = random.randrange(NUM_HOST)
+                # end_node = random.randrange(NUM_HOST)
+                # if start_node == end_node:
+                #     continue
                 if random.randrange(2) == 0:
                     _type = "video"
-
-                if _type == "other":
-                    future = executor.submit(self.__other_traffic, start_node=start_node, end_node=end_node)
-                    future_list.append(future)
-                else:
+                    node1 = video_server[random.randrange(2)]
+                    node2 = clinet[random.randrange(17)]
+                    start_node, end_node = (node1, node2) if random.randrange(2) == 0 else (node2, node1)
                     future = executor.submit(self.__video_traffic, start_node=start_node, end_node=end_node)
                     future_list.append(future)
+                else:
+                    _type = "other"
+                    client_tmp = copy.deepcopy(client)
+                    tmp = random.randrange(17)
+                    start_node = client_tmp[tmp]
+                    del client_tmp[tmp]
+                    end_node = client_tmp[random.randrange(16)]
+                    future = executor.submit(self.__other_traffic, start_node=start_node, end_node=end_node)
+                    future_list.append(future)
                 
-                time.sleep(5)
+                time.sleep(1)
             _ = futures.as_completed(fs=future_list)
 
 
@@ -187,7 +197,7 @@ class L2Network:
             self.list_host[start_node].cmd(f"echo failed video stream >> {LOG_DIR}/result-video-h{start_node + 1}-h{end_node + 1}.txt")
             return
         stream_rate = random.randrange(10, 30)
-        stream_period = random.randrange(10, 30)
+        stream_period = random.randrange(1, 20)
         self.list_host[start_node].cmd(f"iperf -c 10.0.0.{end_node + 1} -u -b {stream_rate}M -t {stream_period}")
         self.list_host[start_node].cmd(f"echo success video stream >> {LOG_DIR}/result-video-h{start_node + 1}-h{end_node + 1}.txt")
         print("end video")
