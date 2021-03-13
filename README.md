@@ -75,5 +75,10 @@ ryu-manager controller.py
      * 切り替えなし：PathSelectAlgorithm.NO_CHANGE
      * ホップ数小を優先：PathSelectAlgorithm.SHORTEST_PATH
      * ホップ数大を優先：PathSelectAlgorithm.LONGEST_PATH
+     * 使用帯域大を優先：PathSelectAlgorithm.BANDWIDTH
+
+### 結果解析
+
+sh analysis.sh <結果フォルダ>
 
 
