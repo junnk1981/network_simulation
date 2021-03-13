@@ -191,8 +191,10 @@ class L2Network:
 
     def __video_traffic(self, start_node, end_node):
         print("start video")
-        payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
+        # payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
+        payload = {"src_host": start_node, "dst_host": end_node}
         res = requests.post(VIDEO_TRAFFIC_FLOW_UPDATE, data=json.dumps(payload))
+        print("start video stream")
         if res.json()["result"] == "fail":
             self.list_host[start_node].cmd(f"echo failed video stream >> {LOG_DIR}/result-video-h{start_node + 1}-h{end_node + 1}.txt")
             return
@@ -205,7 +207,7 @@ class L2Network:
     def __other_traffic(self, start_node, end_node):
         print("start other")
         # other_count += 1
-        payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
+        payload = {"src_host": start_node, "dst_host": end_node}
         res = requests.post(OTHER_TRAFFIC_FLOW_UPDATE, data=json.dumps(payload))
         if res.json()["result"] == "fail":
             self.list_host[start_node].cmd(f"echo failed other stream >> {LOG_DIR}/result-other-h{start_node + 1}-h{end_node + 1}.txt")
