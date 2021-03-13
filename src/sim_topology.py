@@ -157,8 +157,11 @@ class L2Network:
         count = 0
         future_list = []
         with futures.ThreadPoolExecutor(max_workers=100) as executor:
-            video_server = ["h1", "h11"]
-            client = ["h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10", "h12", "h13", "h14", "h15", "h16", "h17", "h18", "h19"]
+            # video_server = ["h1", "h11"]
+            # client = ["h2", "h3", "h4", "h5", "h6", "h7", "h8", "h9", "h10", "h12", "h13", "h14", "h15", "h16", "h17", "h18", "h19"]
+            video_server = [0, 10]
+            client = [1, 2, 3, 4, 5, 6, 7. 8, 9, 11, 12, 13, 14, 15, 16, 17, 18]
+            
             while count < 100:
             # for i in range(4):
                 count += 1
@@ -191,8 +194,7 @@ class L2Network:
 
     def __video_traffic(self, start_node, end_node):
         print("start video")
-        # payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
-        payload = {"src_host": start_node, "dst_host": end_node}
+        payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
         res = requests.post(VIDEO_TRAFFIC_FLOW_UPDATE, data=json.dumps(payload))
         print("start video stream")
         if res.json()["result"] == "fail":
@@ -207,7 +209,7 @@ class L2Network:
     def __other_traffic(self, start_node, end_node):
         print("start other")
         # other_count += 1
-        payload = {"src_host": start_node, "dst_host": end_node}
+        payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
         res = requests.post(OTHER_TRAFFIC_FLOW_UPDATE, data=json.dumps(payload))
         if res.json()["result"] == "fail":
             self.list_host[start_node].cmd(f"echo failed other stream >> {LOG_DIR}/result-other-h{start_node + 1}-h{end_node + 1}.txt")
