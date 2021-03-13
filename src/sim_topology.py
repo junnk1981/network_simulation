@@ -41,6 +41,7 @@ class L2Network:
         self.c0 = self.net.addController('c0', port=PORT)
         self.list_switch = []
         self.list_host = []
+        self.traffic = {}
 
         print("#### test!!!")
 
@@ -164,28 +165,65 @@ class L2Network:
             
             while count < 100:
             # for i in range(4):
-                count += 1
+                print(f"count: {count}")
+                flg_skip = False
+                print(self.traffic)
+                traffic_list = list(_key for _key, _val in self.traffic.items() if _val)
                 # _type = "other"
                 # start_node = random.randrange(NUM_HOST)
                 # end_node = random.randrange(NUM_HOST)
                 # if start_node == end_node:
                 #     continue
                 if random.randrange(2) == 0:
-                    _type = "video"
-                    node1 = video_server[random.randrange(2)]
-                    node2 = client[random.randrange(17)]
-                    start_node, end_node = (node1, node2) if random.randrange(2) == 0 else (node2, node1)
-                    future = executor.submit(self.__video_traffic, start_node=start_node, end_node=end_node)
-                    future_list.append(future)
+                    try:
+                        _type = "video"
+                        node1 = video_server[random.randrange(2)]
+                        node2 = client[random.randrange(17)]
+                        start_node, end_node = (node1, node2) if random.randrange(2) == 0 else (node2, node1)
+                        for traffic in traffic_list:
+                            if traffic.startswith(f"h{start_node + 1}h"):
+                                print("video skip")
+                                print(traffic_list)
+                                flg_skip = True
+                        if not self.traffic.get(f"h{start_node + 1}h{end_node + 1}") and flg_skip == False:
+                            # print("hoge")
+                            self.traffic[f"h{start_node + 1}h{end_node + 1}"] = True
+                            future = executor.submit(self.__video_traffic, start_node=start_node, end_node=end_node)
+                            future_list.append(future)
+                            count += 1
+                        else:
+                            print("video skip2")
+                            pass
+                            # print("hige")
+                    except BaseException as e:
+                        print(e)
                 else:
-                    _type = "other"
-                    client_tmp = copy.deepcopy(client)
-                    tmp = random.randrange(17)
-                    start_node = client_tmp[tmp]
-                    del client_tmp[tmp]
-                    end_node = client_tmp[random.randrange(16)]
-                    future = executor.submit(self.__other_traffic, start_node=start_node, end_node=end_node)
-                    future_list.append(future)
+                    try:
+                        _type = "other"
+                        client_tmp = copy.deepcopy(client)
+                        tmp = random.randrange(17)
+                        start_node = client_tmp[tmp]
+                        del client_tmp[tmp]
+                        end_node = client_tmp[random.randrange(16)]
+                        # print(f"start_node: {start_node}, end_node: {end_node}")
+                        # print(self.traffic.get(f"h{start_node + 1}h{end_node + 1}"))
+                        for traffic in traffic_list:
+                            if traffic.startswith(f"h{start_node + 1}h"):
+                                print("other skip")
+                                print(traffic_list)
+                                flg_skip = True
+                        if not self.traffic.get(f"h{start_node + 1}h{end_node + 1}") and flg_skip == False:
+                            # print("hage")
+                            self.traffic[f"h{start_node + 1}h{end_node + 1}"] = True
+                            future = executor.submit(self.__other_traffic, start_node=start_node, end_node=end_node)
+                            future_list.append(future)
+                            count += 1
+                        else:
+                            print("other skip2")
+                            pass
+                            # print("huge")
+                    except BaseException as e:
+                        print(e)
                 
                 time.sleep(1)
             _ = futures.as_completed(fs=future_list)
@@ -193,31 +231,48 @@ class L2Network:
 
 
     def __video_traffic(self, start_node, end_node):
-        print("start video")
-        payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
-        res = requests.post(VIDEO_TRAFFIC_FLOW_UPDATE, data=json.dumps(payload))
-        print("start video stream")
-        if res.json()["result"] == "fail":
-            self.list_host[start_node].cmd(f"echo failed video stream >> {LOG_DIR}/result-video-h{start_node + 1}-h{end_node + 1}.txt")
-            return
-        stream_rate = random.randrange(10, 30)
-        stream_period = random.randrange(1, 20)
-        self.list_host[start_node].cmd(f"iperf -c 10.0.0.{end_node + 1} -u -b {stream_rate}M -t {stream_period}")
-        self.list_host[start_node].cmd(f"echo success video stream >> {LOG_DIR}/result-video-h{start_node + 1}-h{end_node + 1}.txt")
-        print("end video")
+        print(f"start video. start_node: {start_node + 1}, end_node: {end_node + 1}")
+        try:
+            payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
+            print(f"updating flow table for video. start_node: {start_node + 1}, end_node: {end_node + 1}")
+            res = requests.post(VIDEO_TRAFFIC_FLOW_UPDATE, data=json.dumps(payload))
+            if res.json()["result"] == "fail":
+                self.list_host[start_node].cmd(f"echo failed video stream >> {LOG_DIR}/result-video-h{start_node + 1}-h{end_node + 1}.txt")
+                self.traffic[f"h{start_node + 1}h{end_node + 1}"] = False
+                print(f"end video. start_node: {start_node + 1}, end_node: {end_node + 1}")
+                return
+            stream_rate = random.randrange(10, 30)
+            stream_period = random.randrange(1, 20)
+            print(f"sending traffic for video. start_node: {start_node + 1}, end_node: {end_node + 1}")
+            self.list_host[start_node].cmd(f"iperf -c 10.0.0.{end_node + 1} -u -b {stream_rate}M -t {stream_period}")
+            print(f"update result file for video. start_node: {start_node + 1}, end_node: {end_node + 1}")
+            self.list_host[start_node].cmd(f"echo success video stream >> {LOG_DIR}/result-video-h{start_node + 1}-h{end_node + 1}.txt")
+        except BaseException as e:
+            print(f"occur error video traffic. start_node: {start_node + 1}, end_node: {end_node + 1}, error: {e}")
+        print(f"end video. start_node: {start_node + 1}, end_node: {end_node + 1}")
+        self.traffic[f"h{start_node + 1}h{end_node + 1}"] = False
 
     def __other_traffic(self, start_node, end_node):
-        print("start other")
+        print(f"start other. start_node: {start_node + 1}, end_node: {end_node + 1}")
         # other_count += 1
-        payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
-        res = requests.post(OTHER_TRAFFIC_FLOW_UPDATE, data=json.dumps(payload))
-        if res.json()["result"] == "fail":
-            self.list_host[start_node].cmd(f"echo failed other stream >> {LOG_DIR}/result-other-h{start_node + 1}-h{end_node + 1}.txt")
-            return
-        data_size = random.randrange(100, 900)
-        self.list_host[start_node].cmd(f"iperf -c 10.0.0.{end_node + 1} -n {data_size}M | grep sec >> {LOG_DIR}/result-other-h{start_node + 1}-h{end_node + 1}.txt")
-        res = requests.post(OTHER_TRAFFIC_FLOW_COMPLETE, data=json.dumps(payload))
-        print("end other")
+        try:
+            payload = {"src_host": f"h{start_node + 1}", "dst_host": f"h{end_node + 1}"}
+            print(f"updating flow table for other. start_node: {start_node + 1}, end_node: {end_node + 1}")
+            res = requests.post(OTHER_TRAFFIC_FLOW_UPDATE, data=json.dumps(payload))
+            if res.json()["result"] == "fail":
+                self.list_host[start_node].cmd(f"echo failed other stream >> {LOG_DIR}/result-other-h{start_node + 1}-h{end_node + 1}.txt")
+                self.traffic[f"h{start_node + 1}h{end_node + 1}"] = False
+                print(f"end other. start_node: {start_node + 1}, end_node: {end_node + 1}")
+                return
+            data_size = random.randrange(100, 900)
+            print(f"sending traffic for other. start_node: {start_node + 1}, end_node: {end_node + 1}")
+            self.list_host[start_node].cmd(f"iperf -c 10.0.0.{end_node + 1} -n {data_size}M | grep sec >> {LOG_DIR}/result-other-h{start_node + 1}-h{end_node + 1}.txt")
+            print(f"complete traffic for othe. start_node: {start_node + 1}, end_node: {end_node + 1}")
+            res = requests.post(OTHER_TRAFFIC_FLOW_COMPLETE, data=json.dumps(payload))
+        except BaseException as e:
+            print(f"occur error other traffic. start_node: {start_node + 1}, end_node: {end_node + 1}, error: {e}")
+        print(f"end other. start_node: {start_node + 1}, end_node: {end_node + 1}")
+        self.traffic[f"h{start_node + 1}h{end_node + 1}"] = False
 
 
 if '__main__' == __name__:
