@@ -40,7 +40,7 @@ class PathSelectAlgorithm(Enum):
     LONGEST_PATH: int = 2
     BANDWIDTH: int = 3
 
-PATH_SELECT_ALGORITHM = PathSelectAlgorithm.LONGEST_PATH
+PATH_SELECT_ALGORITHM = PathSelectAlgorithm.BANDWIDTH
 
 class OpenflowController(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -59,6 +59,8 @@ class OpenflowController(app_manager.RyuApp):
         self.graph = Graph(password=DB_PASS)
         self.monitor_thread = hub.spawn(self._monitor)
         self.other_traffic = {}
+        self.flow_stats_info = {}
+        self.other_traffic_rate = {}
         wsgi = kwargs['wsgi']
         wsgi.register(RestController,
                       {controller_instance_name: self})
@@ -67,6 +69,7 @@ class OpenflowController(app_manager.RyuApp):
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
         self.stats_info[str(datapath.id)] = {}
+        self.flow_stats_info[str(datapath.id)] = {}
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
@@ -155,11 +158,48 @@ class OpenflowController(app_manager.RyuApp):
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
+
         req = parser.OFPFlowStatsRequest(datapath)
         datapath.send_msg(req)
 
         req = parser.OFPPortStatsRequest(datapath, 0, ofproto.OFPP_ANY)
         datapath.send_msg(req)
+
+    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
+    def _flow_stats_reply_handler(self, ev):
+        body = ev.msg.body
+        dpid = ev.msg.datapath.id
+        for stat in body:
+            if stat.priority != 1:
+                raise Exception("stats monitor error")
+            self.__update_flow_stats_info(dpid, stat)
+
+    def __update_flow_stats_info(self, dpid, stat):
+        src_mac = stat.match['eth_src']
+        dst_mac = stat.match['eth_dst']
+        src_host = list(filter(lambda x: x["mac"] == src_mac, HOST_LIST))[0]["name"]
+        dst_host = list(filter(lambda x: x["mac"] == dst_mac, HOST_LIST))[0]["name"]
+        duration_sec = stat.duration_sec
+        duration_nsec = stat.duration_nsec
+        tx_bytes = stat.byte_count
+        flow_info = self.flow_stats_info.get(str(dpid), {}).get(f"{src_host}{dst_host}", {})
+        sec = (stat.duration_sec + stat.duration_nsec / 10**9) - flow_info.get("duration", 0)
+        tx_bytes_of_this_duration = tx_bytes - flow_info.get("tx_bytes", 0)
+        tx_rate = tx_bytes_of_this_duration * 8 / sec
+        self.flow_stats_info[str(dpid)].update(
+                {
+                f"{src_host}{dst_host}": {
+                    'duration': stat.duration_sec + stat.duration_nsec / 10**9,
+                    'tx_bytes': tx_bytes
+                }
+            }
+        )
+        if not self.other_traffic.get(f"{src_host}{dst_host}"):
+            self.other_traffic_rate.pop(f"{src_host}{dst_host}", None)
+            return 
+        self.other_traffic_rate[f"{src_host}{dst_host}"] = {
+            'tx_rate': tx_rate
+        }
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
     def _port_stats_reply_handler(self, ev):
@@ -368,7 +408,11 @@ class OpenflowController(app_manager.RyuApp):
             elif PATH_SELECT_ALGORITHM == PathSelectAlgorithm.LONGEST_PATH:
                 sorted_other_traffic_list = sorted(other_traffic_list, key=lambda x: x['num_nodes'], reverse=True)
             elif PATH_SELECT_ALGORITHM == PathSelectAlgorithm.BANDWIDTH:
-                raise Exception("not implemented")
+                other_traffic_list_add_rate = []
+                for traffic in other_traffic_list:
+                    tx_rate = self.other_traffic_rate.get(traffic["key"], {}).get("tx_rate", 0)
+                    other_traffic_list_add_rate.append(traffic.update({"tx_rate": tx_rate}))
+                sorted_other_traffic_list = sorted(other_traffic_list, key=lambda x: x['tx_rate'], reverse=True)
             elif PATH_SELECT_ALGORITHM == PathSelectAlgorithm.NO_CHANGE:
                 raise Exception("not enough bandwidth")
             for traffic in sorted_other_traffic_list:
