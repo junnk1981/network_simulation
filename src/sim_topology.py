@@ -170,7 +170,7 @@ class L2Network:
                 if random.randrange(2) == 0:
                     _type = "video"
                     node1 = video_server[random.randrange(2)]
-                    node2 = clinet[random.randrange(17)]
+                    node2 = client[random.randrange(17)]
                     start_node, end_node = (node1, node2) if random.randrange(2) == 0 else (node2, node1)
                     future = executor.submit(self.__video_traffic, start_node=start_node, end_node=end_node)
                     future_list.append(future)
