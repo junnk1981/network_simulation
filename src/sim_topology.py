@@ -87,8 +87,8 @@ class L2Network:
             # mininetにHostを登録
             host = self.net.addHost(host_name)
             # Hostでiperfサーバを起動
-            host.cmd("iperf -s &")
-            host.cmd("iperf -s -u&")
+            # host.cmd("iperf -s &")
+            # host.cmd("iperf -s -u&")
             # list_hostにHostを登録
             self.list_host.append(host)
             # neo4jにHostを登録
@@ -188,7 +188,7 @@ class L2Network:
             # 他トラフィックを送信するインスタンスの定義
             client = [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 17, 18]
             
-            ♯ 以下条件を満たすまで繰り返し
+            # 以下条件を満たすまで繰り返し
             while count < 100:
                 print(f"count: {count}")
                 flg_skip = False
