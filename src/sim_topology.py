@@ -86,9 +86,6 @@ class L2Network:
             host_name = HOST_LIST[i]["name"]
             # mininetにHostを登録
             host = self.net.addHost(host_name)
-            # Hostでiperfサーバを起動
-            host.cmd("iperf -s &")
-            host.cmd("iperf -s -u&")
             # list_hostにHostを登録
             self.list_host.append(host)
             # neo4jにHostを登録
@@ -137,6 +134,11 @@ class L2Network:
 
         # Commit
         tx.commit()
+
+        for host in self.list_host:
+            # Hostでiperfサーバを起動
+            host.cmd("iperf -s &")
+            host.cmd("iperf -s -u&")
 
     def _link_to_node(self, link):
         '''
