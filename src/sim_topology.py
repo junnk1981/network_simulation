@@ -87,8 +87,8 @@ class L2Network:
             # mininetにHostを登録
             host = self.net.addHost(host_name)
             # Hostでiperfサーバを起動
-            # host.cmd("iperf -s &")
-            # host.cmd("iperf -s -u&")
+            host.cmd("iperf -s &")
+            host.cmd("iperf -s -u&")
             # list_hostにHostを登録
             self.list_host.append(host)
             # neo4jにHostを登録
