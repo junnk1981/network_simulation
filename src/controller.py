@@ -14,17 +14,27 @@ from ryu.lib import hub
 from ryu.controller import dpset
 from webob import Response
 
-from operator import attrgetter
+from facade.route_facade import RouteFacade
 
-from py2neo import Graph, Node, Relationship
+from operator import attrgetter
 
 from definitions.host import HOST_LIST
 from definitions.network import LINK
 
 from enum import Enum
 
-# neo4jのdatabaseのパスワードを環境変数から取得
-DB_PASS = os.getenv("DB_PASS", "password")
+import logging
+
+logger = logging.getLogger("logger")
+logger.setLevel(logging.DEBUG)
+
+LOGFILE = "controller.log"
+
+handler = logging.FileHandler(filename="controller.log")
+handler.setLevel(logging.DEBUG)
+handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)8s %(message)s"))
+
+logger.addHandler(handler)
 
 # rest api用のインスタンスとurl
 controller_instance_name = 'controller_api_app'
@@ -67,7 +77,6 @@ class OpenflowController(app_manager.RyuApp):
         self.datapaths = {}
         self.stats_info = {}
         self.dpset = kwargs['dpset']
-        self.graph = Graph(password=DB_PASS)
         self.monitor_thread = hub.spawn(self._monitor)
         self.other_traffic = {}
         self.flow_stats_info = {}
@@ -90,33 +99,6 @@ class OpenflowController(app_manager.RyuApp):
 
         self.__initial_setup_flow_table(datapath)
 
-    def __get_shortest_path(self, src_type, src_node_name, dst_type, dst_node_name):
-        '''
-        neo4jからsrcとdst間の最短パスを取得する
-        '''
-        string = f'MATCH p = shortestPath((s:{src_type} {{name:"{src_node_name}"}})-[:connect*0..]-(d:{dst_type} {{name:"{dst_node_name}"}})) RETURN p'
-        res = self.graph.run(string)
-        lines = str(res).split("\n")
-        return lines[2]
-
-    def __get_connected_host(self, datapath_id):
-        '''
-        neo4jからdatapath_idに対応するスイッチに接続されているhostを取得する
-        '''
-        string = f'MATCH (s:switch {{name:"s{datapath_id}"}})-[:connect]->(d:host) RETURN d'
-        res = self.graph.run(string)
-        lines = str(res).split("\n")
-        hosts = []
-        for i in range(len(lines)):
-            if i < 2:
-                continue
-            m = re.search(r'^ \([^ ]* {name: \'(.*)\'}\)', lines[i])
-            print(lines[i])
-            if m:
-                hosts.append(m.group(1))
-        
-        return hosts
-
     def __initial_setup_flow_table(self, datapath):
         '''
         datapathに対応するスイッチに初期フロー（最短パス）を登録する
@@ -125,7 +107,7 @@ class OpenflowController(app_manager.RyuApp):
         parser = datapath.ofproto_parser
         for host in HOST_LIST:
             # スイッチからhostへの最短パスを取得
-            shortest_path = self.__get_shortest_path("switch", switch_name, "host", host["name"])
+            shortest_path = RouteFacade.get_shortest_path("switch", switch_name, "host", host["name"])
             # 最短パスから次のnodeを取得し、そのnodeがつながるポートを取得
             m = re.search(r'^ \((s[\w]*)\)[^(]*\(([sh][\w]*)\).*', shortest_path)
             next_node_name = m.group(2)
@@ -176,11 +158,11 @@ class OpenflowController(app_manager.RyuApp):
         datapath = ev.datapath
         if ev.state == MAIN_DISPATCHER:
             if datapath.id not in self.datapaths:
-                self.logger.debug('register datapath: %016x', datapath.id)
+                logger.debug('register datapath: %016x', datapath.id)
                 self.datapaths[datapath.id] = datapath
         elif ev.state == DEAD_DISPATCHER:
             if datapath.id in self.datapaths:
-                self.logger.debug('unregister datapath: %016x', datapath.id)
+                logger.debug('unregister datapath: %016x', datapath.id)
                 del self.datapaths[datapath.id]
 
     def _monitor(self):
@@ -197,7 +179,7 @@ class OpenflowController(app_manager.RyuApp):
         '''
         Switchに統計情報をリクエスト
         '''
-        self.logger.debug('send stats request: %016x', datapath.id)
+        logger.debug('send stats request: %016x', datapath.id)
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
 
@@ -302,8 +284,6 @@ class OpenflowController(app_manager.RyuApp):
         '''
         ポート統計情報を元にneo4jの情報をアップデート
         '''
-        tx_rate_mb = tx_rate / 1024 / 1024
-        rx_rate_mb = rx_rate / 1024 / 1024
         connected_node = None
         # Switchの該当ポートに接続されているnodeを検索
         for li in LINK:
@@ -317,13 +297,7 @@ class OpenflowController(app_manager.RyuApp):
             return
 
         # neo4jで管理している各リンクの使用帯域情報をアップデート
-        if connected_node.startswith('s'):
-            string = f'MATCH (s:switch {{name:"{switch_name}"}})-[c:connect]->(d:switch{{name:"{connected_node}"}}) SET c.{switch_name}{connected_node} = {tx_rate_mb}, c.{connected_node}{switch_name} = {rx_rate_mb} RETURN d'
-        elif connected_node.startswith('h'):
-            string = f'MATCH (s:switch {{name:"{switch_name}"}})-[c:connect]->(d:host{{name:"{connected_node}"}}) SET c.{switch_name}{connected_node} = {tx_rate_mb}, c.{connected_node}{switch_name} = {rx_rate_mb} RETURN d'
-        else:
-            raise Exception('Internal Error')
-        self.graph.run(string)
+        RouteFacade.update_bandwitdh_usage(switch_name, connected_node, port, tx_rate, rx_rate)
 
     def update_flow_table(self, src_host, dst_host, traffic_type):
         '''
@@ -332,41 +306,17 @@ class OpenflowController(app_manager.RyuApp):
         # ビデオトラフィックの場合の処理
         if traffic_type == "video":
             # src_hostからdst_hostへの最短パスを取得
-            path_list = [self.__get_shortest_path("host", src_host, "host", dst_host)]
+            path_list = [RouteFacade.get_shortest_path("host", src_host, "host", dst_host)]
             path_info_list = self.__parse_path_list(path_list)
             # フローをアップデート
             self.__update_video_flow_table(path_info_list)
         # 他トラフィックの場合の処理
         else:
             # src_hostからdst_hostへの全パスを取得
-            path_list = self.__get_path_list("host", src_host, "host", dst_host)
+            path_list = RouteFacade.get_path_list("host", src_host, "host", dst_host)
             path_info_list = self.__parse_path_list(path_list)
             #フローをアップデート
             self.__update_other_flow_table(path_info_list)
-        
-    def __get_path_list(self, src_type, src_node_name, dst_type, dst_node_name, filter_path = None):
-        '''
-        src_node_nameからdst_node_nameへのパス情報を取得する
-        filter_pathに含まれるパスは含まない
-        '''
-        total_paths = []
-        where_string = ""
-        # filter_pathが含まれる場合はfilter条件を追加
-        if filter_path:
-            where_string = "WHERE ALL(n IN RELATIONSHIPS(p) WHERE not "
-            for i in range(len(filter_path) - 1):
-                where_string += f'(startNode(n).name = "{filter_path[i]}" and endNode(n).name = "{filter_path[i + 1]}") and not '
-                where_string += f'(startNode(n).name = "{filter_path[i + 1]}" and endNode(n).name = "{filter_path[i]}") and not '
-            where_string = where_string[:-9] + ") "
-        # ホップ数が20までの経路を取得
-        for i in range(20):
-            string = f'MATCH p = (h:{src_type} {{name:"{src_node_name}"}})-[:connect*{i}..{i}]-(d:{dst_type} {{name:"{dst_node_name}"}}) {where_string}RETURN p'
-            res = self.graph.run(string)
-            paths = str(res).split("\n")
-            if len(paths) > 3:
-                paths = paths[2:-1]
-                total_paths += paths
-        return total_paths
 
     def __parse_path_list(self, path_list):
         '''
@@ -429,7 +379,7 @@ class OpenflowController(app_manager.RyuApp):
                 self.__modify_other_flow_table(info)
                 self.__update(info["nodes"])
                 return
-        print("error in __update_video_flow_table")
+        logger.error("error in __update_video_flow_table")
         raise Exception
 
     def __update_other_flow_table(self, path_info_list, modify=False):
@@ -446,12 +396,12 @@ class OpenflowController(app_manager.RyuApp):
                 end_node = nodes[-1]
                 # すでにトラフィックが終了している場合はそのままreturn
                 if modify and not self.other_traffic[f"{start_node}{end_node}"]:
-                    print("already completed the traffic")
+                    logger.warning("already completed the traffic")
                     return
                 # 他トラフィック情報に登録
                 self.other_traffic[f"{start_node}{end_node}"] = nodes
                 return
-        print("error found no path with enough bandwidth")
+        logger.error("error found no path with enough bandwidth")
         raise Exception
 
     def __update(self, nodes):
@@ -469,7 +419,7 @@ class OpenflowController(app_manager.RyuApp):
                 parser = datapath.ofproto_parser
                 actions = [parser.OFPActionOutput(int(port1))]
                 match = parser.OFPMatch(eth_src=src_node_mac, eth_dst=dst_node_mac)
-                print(f"switch: {nodes[i]}, dpid: {datapath.id}, src: {src_node_mac}, dst: {dst_node_mac}, port: {port1}")
+                logger.debug(f"switch: {nodes[i]}, dpid: {datapath.id}, src: {src_node_mac}, dst: {dst_node_mac}, port: {port1}")
                 self.add_flow(datapath, 1, match, actions)
 
             # 下り方向のフロー更新
@@ -479,7 +429,7 @@ class OpenflowController(app_manager.RyuApp):
                 parser = datapath.ofproto_parser
                 actions = [parser.OFPActionOutput(int(port2))]
                 match = parser.OFPMatch(eth_src=dst_node_mac, eth_dst=src_node_mac)
-                print(f"switch: {nodes[i + 1]}, dpid: {datapath.id}, src: {dst_node_mac}, dst: {src_node_mac}, port: {port2}")
+                logger.debug(f"switch: {nodes[i + 1]}, dpid: {datapath.id}, src: {dst_node_mac}, dst: {src_node_mac}, port: {port2}")
                 self.add_flow(datapath, 1, match, actions)
 
     def __get_port(self, node1, node2):
@@ -546,13 +496,15 @@ class OpenflowController(app_manager.RyuApp):
                     break
         # 決定した他トラフィックのフローテーブルを更新
         for key in change_traffic_keys:
+            print("hogehoge-")
             m = re.search(r'(h[0-9]*)(h[0-9]*)', key)
             src_node_name = m.group(1)
             dst_node_name = m.group(2)
-            print(src_node_name)
-            print(dst_node_name)
-            print(self.other_traffic[key])
-            path_list = self.__get_path_list("host", src_node_name, "host", dst_node_name, info["nodes"])
+            logger.debug(src_node_name)
+            logger.debug(dst_node_name)
+            logger.debug(self.other_traffic[key])
+            path_list = RouteFacade.get_path_list("host", src_node_name, "host", dst_node_name, info["nodes"])
+            print(path_list)
             path_info_list = self.__parse_path_list(path_list)
             self.__update_other_flow_table(path_info_list, True)
             
@@ -591,8 +543,7 @@ class RestController(ControllerBase):
 
         controller_app = self.controller_app
 
-        print(req)
-        print(kwargs)
+        logger.debug(req)
 
         try:
             body = req.json if req.body else {}
@@ -605,7 +556,7 @@ class RestController(ControllerBase):
             controller_app.update_flow_table(src_host, dst_host, "other")
             res = {"result": "success"}
         except Exception as e:
-            print(e)
+            logger.error(e)
             res = {"result": "fail"}
         body = json.dumps(res)
         return Response(content_type='application/json', json_body=res)
@@ -618,8 +569,7 @@ class RestController(ControllerBase):
 
         controller_app = self.controller_app
 
-        print(req)
-        print(kwargs)
+        logger.debug(req)
 
         try:
             body = req.json if req.body else {}
@@ -632,7 +582,7 @@ class RestController(ControllerBase):
             controller_app.update_flow_table(src_host, dst_host, "video")
             res = {"result": "success"}
         except Exception as e:
-            print(e)
+            logger.error(e)
             res = {"result": "fail"}
         body = json.dumps(res)
         return Response(content_type='application/json', json_body=res)
@@ -656,7 +606,7 @@ class RestController(ControllerBase):
             controller_app.complete_other_traffic(src_host, dst_host)
             res = {"result": "success"}
         except Exception as e:
-            print(e)
+            logger.error(e)
             res = {"result": "fail"}
         body = json.dumps(res)
         return Response(content_type='application/json', json_body=res)
@@ -672,7 +622,7 @@ class RestController(ControllerBase):
         try:
             res = controller_app.get_other_traffic()
         except Exception as e:
-            print(e)
+            logger.error(e)
             res = {"result": "fail"}
         body = json.dumps(res)
         return Response(content_type='application/json', json_body=res)
